@@ -144,6 +144,11 @@ thread_local! {
         const { RefCell::new(None) };
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     static PENDING_FOCUS_ELEMENT: RefCell<Option<u64>> = const { RefCell::new(None) };
+    /// Font files registered with `GpuixRenderer.addFont` before `init`. The
+    /// text system only exists once the app starts, so they wait here and are
+    /// added before the window opens, ahead of the first layout.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    static PENDING_FONTS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
     /// Shared scroll handles — GpuixView writes here during render(),
     /// platform-local handlers read from here for programmatic scroll control.
     /// ScrollHandle is Rc<RefCell<...>> so its methods (set_offset, offset,
@@ -2700,6 +2705,13 @@ fn start_web_app(
     gpui_platform::web_init();
     let app = gpui_platform::single_threaded_web().run_embedded(move |cx| {
         crate::custom_elements::input::init(cx);
+        let fonts = PENDING_FONTS.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
+        if !fonts.is_empty() {
+            let fonts = fonts.into_iter().map(std::borrow::Cow::Owned).collect();
+            if let Err(error) = cx.text_system().add_fonts(fonts) {
+                log::error!("Failed to add GPUIX web fonts: {error:#}");
+            }
+        }
         let window = cx.open_window(Default::default(), |window, cx| {
             if let Some(mode) = PENDING_DEBUG_OVERLAY.with(|pending| pending.borrow_mut().take()) {
                 window.set_debug_frame_overlay_mode(mode);
@@ -3105,6 +3117,28 @@ impl WebGpuixRenderer {
         update_web_window(move |view, window, cx| {
             view.set_image_pixels(id, width, height, bytes, window, cx)
                 .map_err(|error| wasm_bindgen::JsValue::from_str(&error))
+        })?
+    }
+
+    /// Registers a TTF or OTF font file with the text system, so `fontFamily`
+    /// can name it. The browser build ships only IBM Plex Sans and Lilex and
+    /// never sees CSS `@font-face` fonts. WOFF and WOFF2 are not supported.
+    ///
+    /// Call it before `render()` so the first frame already uses the font.
+    /// Later calls add the font and repaint the window.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = addFont)]
+    pub fn add_font(bytes: js_sys::Uint8Array) -> Result<(), wasm_bindgen::JsValue> {
+        let bytes = bytes.to_vec();
+        if WEB_APP.with(|app| app.borrow().is_none()) {
+            PENDING_FONTS.with(|pending| pending.borrow_mut().push(bytes));
+            return Ok(());
+        }
+        update_web_window_without_view(move |window, cx| {
+            cx.text_system()
+                .add_fonts(vec![std::borrow::Cow::Owned(bytes)])
+                .map_err(|error| wasm_bindgen::JsValue::from_str(&format!("{error:#}")))?;
+            window.refresh();
+            Ok(())
         })?
     }
 

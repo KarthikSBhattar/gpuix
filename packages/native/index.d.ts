@@ -35,6 +35,12 @@ export declare class AvailableUpdate {
 /** The main GPUI renderer exposed to Node.js. */
 export declare class GpuixRenderer {
   constructor(eventCallback?: (((err: Error | null, arg: EventPayload) => any)) | undefined | null)
+  /**
+   * Browser build only. Registers a TTF or OTF font file so `fontFamily` can
+   * name it; the web renderer ships only IBM Plex Sans and Lilex and never sees
+   * CSS `@font-face` fonts. Call before `render()` so the first frame uses it.
+   */
+  static addFont(bytes: Uint8Array): void
   /** Initialize GPUI using the native event-loop architecture for this OS. */
   init(options?: WindowOptions | undefined | null): void
   /**
