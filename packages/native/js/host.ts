@@ -471,6 +471,8 @@ export interface InputProps extends HostProps {
   value?: string
   placeholder?: string
   readOnly?: boolean
+  /** Like HTML `disabled`: clicks don't focus it, and it gives up focus when disabled. */
+  disabled?: boolean
   theme?: GpuixTheme
 }
 
@@ -525,6 +527,8 @@ export interface SvgProps extends HostProps {
   src?: string
   /** Raw SVG markup rendered directly by GPUI. */
   source?: string
+  /** Clockwise degrees around the element's center; cheap to animate. */
+  rotation?: number
 }
 
 /**

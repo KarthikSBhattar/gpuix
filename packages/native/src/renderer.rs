@@ -3553,6 +3553,27 @@ fn emit_highlight_events(callback: &Option<EventCallback>, events: &[(u64, usize
     }
 }
 
+/// Browsers blur the focused element on a mousedown that lands on nothing
+/// focusable. This clears focus in the capture phase; a clicked input or
+/// tabIndex element focuses itself again in the bubble phase, and GPUI only
+/// reports the net focus change, so clicking a focused input is not a blur.
+///
+/// A window-level listener rather than a div's `capture_any_mouse_down`: that
+/// one only fires while the div's hitbox is hovered, and app elements occlude
+/// the root.
+fn blur_on_outside_mouse_down() -> impl gpui::IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        |_, _, window, _| {
+            window.on_mouse_event(|event: &gpui::MouseDownEvent, phase, window, _cx| {
+                if phase == gpui::DispatchPhase::Capture && event.button == gpui::MouseButton::Left {
+                    window.blur();
+                }
+            });
+        },
+    )
+}
+
 fn window_key_events(
     callback: Option<EventCallback>,
     key_down: bool,
@@ -4777,7 +4798,7 @@ impl gpui::Render for GpuixView {
             use gpui::prelude::*;
             let drag_move_view = cx.weak_entity();
             let drag_end_view = drag_move_view.clone();
-            let root = gpui::div().size_full();
+            let root = gpui::div().size_full().child(blur_on_outside_mouse_down());
             with_window_menu_actions(root)
                 .when(
                     self.window_key_down

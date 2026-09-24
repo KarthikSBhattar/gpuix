@@ -371,6 +371,9 @@ pub struct SvgElement {
     src: String,
     bytes: Option<std::sync::Arc<[u8]>>,
     source: String,
+    /// Clockwise degrees around the element's center. Applied to the rasterized
+    /// sprite, so animating it never re-rasterizes the SVG.
+    rotation: f32,
 }
 
 impl SvgElement {
@@ -453,11 +456,13 @@ impl CustomElement for SvgElement {
             .and_then(|style| style.color.as_deref())
             .and_then(crate::color::parse_color_rgba)
             .unwrap_or_else(|| gpui::rgb(0xe2e2e2).into());
-        let mut icon = gpui::svg()
-            .data(bytes)
-            .flex_none()
-            .text_color(tint)
-            .id(element_id);
+        let mut icon = gpui::svg().data(bytes).flex_none().text_color(tint);
+        if self.rotation != 0.0 {
+            icon = icon.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                self.rotation.to_radians(),
+            )));
+        }
+        let mut icon = icon.id(element_id);
         if let Some(style) = ctx.style {
             icon = crate::renderer::apply_interactive_styles(icon, style);
         }
@@ -470,12 +475,13 @@ impl CustomElement for SvgElement {
         match key {
             "src" => self.load_src(value.as_str().unwrap_or_default().to_string()),
             "source" => self.source = value.as_str().unwrap_or_default().to_string(),
+            "rotation" => self.rotation = value.as_f64().unwrap_or(0.0) as f32,
             _ => {}
         }
     }
 
     fn supported_props(&self) -> &'static [&'static str] {
-        &["src", "source"]
+        &["src", "source", "rotation"]
     }
 
     fn supported_events(&self) -> &'static [&'static str] {

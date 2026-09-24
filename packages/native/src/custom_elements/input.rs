@@ -71,7 +71,7 @@ const INPUT_KEY_CONTEXT: &str = "GpuixInput";
 const TEXTAREA_KEY_CONTEXT: &str = "GpuixTextarea";
 const TEXTAREA_SUBMIT_KEY_CONTEXT: &str = "GpuixTextareaSubmit";
 const CARET_BLINK_MS: u64 = 500;
-const CARET_WIDTH: Pixels = px(2.0);
+const CARET_WIDTH: Pixels = px(1.0);
 const DRAG_SCROLL_FRAME_MS: u64 = 16;
 const UNDO_COALESCE: Duration = Duration::from_millis(700);
 const UNDO_LIMIT: usize = 200;
@@ -91,10 +91,24 @@ fn clipboard_text(item: ClipboardItem) -> Option<String> {
     item.text()
 }
 
-// Chrome paints the caret at line height, not font size. Firefox uses the em
-// square after you type. Match Chrome so a 14/20 composer bar is 20px tall.
-fn caret_rect(origin: Point<Pixels>, line_height: Pixels) -> Bounds<Pixels> {
-    Bounds::new(origin, size(CARET_WIDTH, line_height))
+// Chrome paints a 1px caret the height of the font's ascent + descent,
+// centered in the line box like the glyphs (Inter 13px on a 20px line: 16px
+// tall, 2px from the top), and snaps it to device pixels so it stays crisp.
+fn caret_rect(
+    origin: Point<Pixels>,
+    line_height: Pixels,
+    font_height: Pixels,
+    scale_factor: f32,
+) -> Bounds<Pixels> {
+    let snap = |value: f32| (value * scale_factor).round() / scale_factor;
+    let height = if font_height > px(0.0) { font_height.min(line_height) } else { line_height };
+    let top = f32::from(origin.y) + f32::from(line_height - height) / 2.0;
+    let snapped_top = snap(top);
+    let snapped_bottom = snap(top + f32::from(height));
+    Bounds::new(
+        point(px(snap(f32::from(origin.x))), px(snapped_top)),
+        size(CARET_WIDTH, px(snapped_bottom - snapped_top)),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +326,7 @@ struct TextEditorElement {
     value: String,
     placeholder: String,
     read_only: bool,
+    disabled: bool,
     min_rows: usize,
     max_rows: usize,
     last_prop_value: Option<String>,
@@ -326,6 +341,7 @@ impl TextEditorElement {
             value: String::new(),
             placeholder: String::new(),
             read_only: false,
+            disabled: false,
             min_rows: 1,
             max_rows: if multiline { 10 } else { 1 },
             last_prop_value: None,
@@ -359,9 +375,11 @@ impl CustomElement for TextEditorElement {
                 let placeholder = self.placeholder.clone();
                 let multiline = self.multiline;
                 let read_only = self.read_only;
+                let disabled = self.disabled;
                 let min_rows = self.min_rows;
                 let max_rows = self.max_rows;
                 let caret_color = self.theme.caret;
+                let placeholder_color = self.theme.text_faint;
                 let callback = callback.clone();
                 let id = ctx.id;
                 let cursor = value.len();
@@ -378,6 +396,7 @@ impl CustomElement for TextEditorElement {
                     placeholder: placeholder.into(),
                     multiline,
                     read_only,
+                    disabled,
                     min_rows,
                     max_rows,
                     selected_range: cursor..cursor,
@@ -398,7 +417,9 @@ impl CustomElement for TextEditorElement {
                     content_height: 20.0,
                     content_width: 0.0,
                     display_is_placeholder: false,
+                    font_height: px(0.0),
                     caret_color,
+                    placeholder_color,
                     blink_anchor: cx.background_executor().now(),
                     blink_task: None,
                     pending_values: VecDeque::new(),
@@ -421,10 +442,18 @@ impl CustomElement for TextEditorElement {
             state.emits_key_up = emits_key_up;
             state.placeholder = self.placeholder.clone().into();
             state.read_only = self.read_only;
+            if state.disabled != self.disabled {
+                state.disabled = self.disabled;
+                cx.notify();
+            }
             state.min_rows = self.min_rows.max(1);
             state.max_rows = self.max_rows.max(state.min_rows);
             if state.caret_color != self.theme.caret {
                 state.caret_color = self.theme.caret;
+                cx.notify();
+            }
+            if state.placeholder_color != self.theme.text_faint {
+                state.placeholder_color = self.theme.text_faint;
                 cx.notify();
             }
             if prop_changed {
@@ -434,12 +463,15 @@ impl CustomElement for TextEditorElement {
         self.last_prop_value = Some(self.value.clone());
 
         let element_id = gpui::SharedString::from(format!("__gpuix_editor_{}", ctx.id));
+        // GPUI focuses any element that tracks a focus handle on mousedown, so
+        // a disabled field must not track one at all.
+        let disabled = self.disabled;
         let mut editor = div()
             .id(element_id)
             .flex()
             .min_w_0()
             .w_full()
-            .track_focus(&focus_handle)
+            .when(!disabled, |editor| editor.track_focus(&focus_handle))
             .child(state);
         // Single-line inputs center text vertically when given extra height.
         if !self.multiline {
@@ -514,6 +546,7 @@ impl CustomElement for TextEditorElement {
             "value" => self.value = value.as_str().unwrap_or_default().to_string(),
             "placeholder" => self.placeholder = value.as_str().unwrap_or_default().to_string(),
             "readOnly" => self.read_only = value.as_bool().unwrap_or(false),
+            "disabled" => self.disabled = value.as_bool().unwrap_or(false),
             "minRows" => self.min_rows = value.as_u64().unwrap_or(1) as usize,
             "maxRows" => {
                 self.max_rows = value
@@ -531,6 +564,7 @@ impl CustomElement for TextEditorElement {
             "value",
             "placeholder",
             "readOnly",
+            "disabled",
             "minRows",
             "maxRows",
             "theme",
@@ -640,6 +674,8 @@ struct TextEditorState {
     placeholder: SharedString,
     multiline: bool,
     read_only: bool,
+    /// Like HTML `disabled`: no focus from clicks, no caret, arrow cursor.
+    disabled: bool,
     min_rows: usize,
     max_rows: usize,
     selected_range: Range<usize>,
@@ -660,7 +696,10 @@ struct TextEditorState {
     content_height: f32,
     content_width: f32,
     display_is_placeholder: bool,
+    /// Ascent + descent of the input's font, for Chrome-sized carets.
+    font_height: Pixels,
     caret_color: gpui::Hsla,
+    placeholder_color: gpui::Hsla,
     blink_anchor: Instant,
     blink_task: Option<Task<()>>,
     pending_values: VecDeque<String>,
@@ -1198,6 +1237,9 @@ impl TextEditorState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.disabled {
+            return;
+        }
         if !self.read_only {
             window.request_text_input();
         }
@@ -1390,8 +1432,12 @@ impl TextEditorState {
         // `window.line_height()` is always 16×φ. Use the style captured during
         // request_layout instead.
         self.line_height = style.line_height_in_pixels(rem_size);
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&style.font());
+        self.font_height = text_system.ascent(font_id, font_size).abs()
+            + text_system.descent(font_id, font_size).abs();
         let color = if is_placeholder {
-            gpui::rgba(0x8f8f8fff).into()
+            self.placeholder_color
         } else {
             style.color
         };
@@ -1605,12 +1651,12 @@ impl EntityInputHandler for TextEditorState {
     ) -> Option<Bounds<Pixels>> {
         let range = self.range_from_utf16(&range_utf16);
         let start = self.point_for_index(range.start)?;
-        Some(caret_rect(
+        Some(Bounds::new(
             point(
                 bounds.left() + start.x - px(self.scroll_left),
                 bounds.top() + start.y - px(self.scroll_top),
             ),
-            self.line_height,
+            size(CARET_WIDTH, self.line_height),
         ))
     }
 
@@ -1646,7 +1692,11 @@ impl EntityInputHandler for TextEditorState {
 }
 
 impl gpui::Render for TextEditorState {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Disabling a focused field drops its focus, as in the browser.
+        if self.disabled && self.focus_handle.is_focused(window) {
+            window.blur();
+        }
         let key_down_callback = self.callback.clone();
         let key_up_callback = self.callback.clone();
         let element_id = self.element_id;
@@ -1658,8 +1708,8 @@ impl gpui::Render for TextEditorState {
             } else {
                 TEXTAREA_KEY_CONTEXT
             })
-            .track_focus(&self.focus_handle)
-            .cursor(CursorStyle::IBeam)
+            .when(!self.disabled, |editor| editor.track_focus(&self.focus_handle))
+            .cursor(if self.disabled { CursorStyle::Arrow } else { CursorStyle::IBeam })
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -1785,7 +1835,7 @@ impl gpui::Element for EditorTextElement {
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> EditorPrepaint {
         self.input.update(cx, |input, _| {
@@ -1807,6 +1857,8 @@ impl gpui::Element for EditorTextElement {
                 caret_rect(
                     point(origin.x + caret_point.x, origin.y + caret_point.y),
                     input.line_height,
+                    input.font_height,
+                    window.scale_factor(),
                 ),
                 input.caret_color,
             ));
@@ -2033,10 +2085,18 @@ mod tests {
     }
 
     #[test]
-    fn caret_matches_the_line_height() {
-        let bounds = caret_rect(point(px(10.0), px(4.0)), px(20.0));
+    fn caret_matches_chrome_for_inter_13_on_a_20px_line() {
+        // Inter: ascent 0.96875em + descent 0.2421875em = 15.73px at 13px.
+        let bounds = caret_rect(point(px(10.3), px(10.0)), px(20.0), px(15.734375), 2.0);
+        assert_eq!(bounds.origin, point(px(10.5), px(12.0)));
+        assert_eq!(bounds.size, size(px(1.0), px(16.0)));
+    }
+
+    #[test]
+    fn caret_falls_back_to_the_line_height_without_font_metrics() {
+        let bounds = caret_rect(point(px(10.0), px(4.0)), px(20.0), px(0.0), 1.0);
         assert_eq!(bounds.origin, point(px(10.0), px(4.0)));
-        assert_eq!(bounds.size, size(px(2.0), px(20.0)));
+        assert_eq!(bounds.size, size(px(1.0), px(20.0)));
     }
 
     #[test]
