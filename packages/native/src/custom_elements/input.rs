@@ -80,6 +80,34 @@ fn caret_visible(ms_since_activity: u64) -> bool {
     (ms_since_activity / CARET_BLINK_MS) % 2 == 0
 }
 
+/// gpui_web reads keystrokes from a hidden `<textarea data-gpui-input>`, and
+/// only focuses it on pointerdown. A field focused without a click
+/// (`autoFocus`, `focusElement`, Tab) would show a caret but get no keys, so
+/// while one is focused, hand the browser's focus to that textarea too.
+/// Skipped while the page itself is unfocused, so it never pulls focus back
+/// from the address bar or another window.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn focus_browser_text_input() {
+    use wasm_bindgen::JsCast;
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if !document.has_focus().unwrap_or(false) {
+        return;
+    }
+    let Ok(Some(element)) = document.query_selector("textarea[data-gpui-input]") else {
+        return;
+    };
+    if document.active_element().as_ref() == Some(&element) {
+        return;
+    }
+    if let Ok(textarea) = element.dyn_into::<web_sys::HtmlTextAreaElement>() {
+        // gpui_web marks it read-only unless the last click requested text input.
+        textarea.set_read_only(false);
+        textarea.focus().ok();
+    }
+}
+
 fn clipboard_text(item: ClipboardItem) -> Option<String> {
     if item
         .entries
@@ -1920,6 +1948,10 @@ impl gpui::Element for EditorTextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        if focus_handle.is_focused(window) {
+            focus_browser_text_input();
+        }
         let input = self.input.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
             if phase == DispatchPhase::Bubble && event.pressed_button == Some(MouseButton::Left) {
